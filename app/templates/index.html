@@ -89,7 +89,8 @@
       {% endif %}
       <div class="panel-body tight">
         <p class="small muted" style="margin:0">
-          每次执行都会落一条运行记录（含漂移拟合参数、网格、缺口、摘要与覆盖率），可随时回看结果页；同一输入重跑产生新记录，旧记录保留。
+          每次执行都会落一条运行记录（含漂移拟合参数、网格、缺口、摘要与覆盖率），可随时回看结果页；
+          同一数据集 + 设备 + 指标 + 阈值重跑沿用同一条记录（不新增、结论不变），换参数才新增。
         </p>
       </div>
     </section>
@@ -128,7 +129,7 @@
       <div class="panel-body tight">
         <p class="small muted" style="margin:0">
           统一网格：1 分钟桶 × {{ bucket_count }} 格；漂移阈值 {{ threshold }} 秒；
-          缺口 ≤3 格线性插补，&gt;3 格标记未修复；前后原始格间距 ≤3 格时 hold 沿用（carried）。
+          全线断采（所有设备、所有指标同分钟无原始点）→ 留空不可用、绝不修补；单设备断采 ≤3 格线性插补，&gt;3 格未修复；前后原始格间距 ≤3 格时 hold 沿用（carried）。
         </p>
       </div>
     </section>
@@ -174,8 +175,8 @@
         <p>输出：</p>
         <ul class="list small">
           <li>时钟偏移（秒）、走时偏差（ppm）、拟合参数 <code>a/b</code>、校正后残差 RMSE；</li>
-          <li>1 分钟网格（聚合 / 沿用 carried / 插补），前 60 分钟预览；</li>
-          <li>缺口明细（起止桶、格数、插补或未修复、原因），首尾不外推；</li>
+          <li>1 分钟网格（聚合 / 沿用 carried / 单设备短缺口插补 / 全线断采留空），前 60 分钟预览；</li>
+          <li>缺口明细（起止桶、格数、归因（全线/单设备）、插补或未修复、原因），首尾不外推；原始记录永久保留；</li>
           <li>每小时 min/max/mean/p95 + 缺口数 + carried 数；</li>
           <li>覆盖率与 A/B/C 分级，跨设备对比与 CSV 导出。</li>
         </ul>
@@ -185,7 +186,7 @@
           <li>点「校验并载入样例遥测」：按内容 sha256 幂等导入，重复点击不会生成重复数据集。</li>
           <li>进 <a href="/workbench">工作台</a>：选设备 + 指标，执行对齐；页面会显示各阶段真实耗时。</li>
           <li>看 <a href="/workbench">结果页</a>：漂移设备 <code>LINE-A-03</code> 偏移应为 <strong>≈ +37 秒</strong>，
-            温度序列应有 <strong>2 处缺口</strong>（3 格插补、5 格未修复）。</li>
+            温度序列应有 <strong>2 处缺口均为全线断采</strong>（3 格 + 5 格，留空不可用），覆盖率 97.78% → B。</li>
           <li>切到 <code>LINE-A-02</code> 温度：可见 3 分钟降级段被 hold 沿用（carried 计数），覆盖率落到 B 级。</li>
           <li>进 <a href="/review">质量报告</a>：三台设备 A/B/C 分级、跨设备对比，导出 CSV。</li>
         </ol>

@@ -57,7 +57,12 @@
   <div class="kpi {% if run.gaps.count %}warn{% else %}ok{% endif %}">
     <div class="k-label">缺口</div>
     <div class="k-value">{{ run.gaps.count }}</div>
-    <div class="k-note">插补 {{ run.gaps.interpolated_cells }} 格 · 未修复 {{ run.gaps.unrepaired_cells }} 格</div>
+    <div class="k-note">单设备 {{ run.gaps.device_gap_count }} 处 · 全线断采 {{ run.gaps.line_outage_gaps }} 处</div>
+  </div>
+  <div class="kpi {% if run.coverage.line_outage_cells %}err{% else %}ok{% endif %}">
+    <div class="k-label">不可用格</div>
+    <div class="k-value">{{ run.coverage.unavailable_cells }}</div>
+    <div class="k-note">全线断采留空 · 不计有效格</div>
   </div>
   <div class="kpi {% if run.grid.held_cells %}warn{% endif %}">
     <div class="k-label">carried</div>
@@ -86,13 +91,27 @@
     </div>
   </div>
 
-  <div class="panel-body flush">
+    <div class="panel-body flush">
+    {% if run.line_outage and run.line_outage.count %}
+    <div class="alert alert-error" style="margin:12px 12px 0" role="alert">
+      <strong>全线断采 {{ run.line_outage.count }} 段 · 共 {{ run.line_outage.cells }} 格：</strong>
+      该时段所有设备、所有指标均无原始采样点（采集链路中断），网格留空并列为不可用，不做插补；
+      受影响设备：{{ run.line_outage.affected_devices | join('、') }}。
+      {% for w in run.line_outage.windows %}
+      <div class="small" style="margin-top:4px">
+        {{ w.start_time }} → {{ w.end_time }}（{{ w.cells }} 格）· 各设备该时段可用率：
+        {% for d in w.devices %}{{ d.device_id }} {{ d.availability | pct(1) }}{% if not loop.last %} / {% endif %}{% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
     <div id="tab-grid" class="tab-panel">
       <div class="panel-head" style="border-top:0">
         <h3>二、1 分钟网格预览（前 60 分钟）</h3>
         <div class="panel-actions">
           <span class="tag">聚合 {{ run.grid.agg_cells }} · 采样 {{ run.grid.sample_cells }}</span>
           <span class="tag warn">沿用 {{ run.grid.held_cells }}</span>
+          <span class="tag {% if run.grid.line_outage_cells %}err{% endif %}">全线断采 {{ run.grid.line_outage_cells }}</span>
           <span class="tag">空缺 {{ run.grid.empty_cells }}（含未修复）</span>
         </div>
       </div>
@@ -113,6 +132,7 @@
                 {% elif cell.source == 'sample' %}<span class="tag">原始采样</span>
                 {% elif cell.source == 'hold' %}<span class="tag warn">沿用 hold</span>
                 {% elif cell.source == 'interpolated' %}<span class="tag warn">插补</span>
+                {% elif cell.unavailable %}<span class="tag err">全线断采·不可用</span>
                 {% else %}<span class="tag err">空缺</span>{% endif %}
               </td>
               <td class="num">{{ cell.samples }}</td>
@@ -128,7 +148,8 @@
       <div class="panel-body tight">
         <p class="small muted" style="margin:0">
           聚合 {{ run.grid.agg_cells }} 格 · 原始采样 {{ run.grid.sample_cells }} 格 · 沿用 carried {{ run.grid.held_cells }} 格 ·
-          空缺 {{ run.grid.empty_cells }} 格（含未修复）。表格在容器内滚动，页面只滚主区。
+          全线断采 {{ run.grid.line_outage_cells }} 格（留空不可用）· 空缺 {{ run.grid.empty_cells }} 格（含未修复与全线断采）。
+          表格在容器内滚动，页面只滚主区。
         </p>
       </div>
     </div>
@@ -175,10 +196,11 @@
 
     <div id="tab-gap" class="tab-panel" hidden>
       <div class="panel-head" style="border-top:0">
-        <h3>三、缺口明细（{{ run.gaps.count }} 处）</h3>
+        <h3>三、缺口明细（{{ run.gaps.count }} 处：单设备 {{ run.gaps.device_gap_count }} / 全线断采 {{ run.gaps.line_outage_gaps }}）</h3>
         <div class="panel-actions">
           <span class="tag">插补 {{ run.gaps.interpolated_cells }} 格</span>
           <span class="tag err">未修复 {{ run.gaps.unrepaired_cells }} 格</span>
+          <span class="tag {% if run.gaps.line_outage_cells %}err{% endif %}">全线断采 {{ run.gaps.line_outage_cells }} 格</span>
           <span class="tag">边界 {{ run.gaps.boundary_cells }} 格</span>
         </div>
       </div>
@@ -186,7 +208,7 @@
       <div class="table-wrap auto">
         <table class="dense">
           <thead><tr><th style="width:40px">#</th><th style="width:170px">起始桶</th><th style="width:170px">结束桶</th>
-            <th style="width:60px">格数</th><th style="width:96px">处理</th><th style="width:170px">前一个有效桶</th>
+            <th style="width:60px">格数</th><th style="width:104px">归因</th><th style="width:96px">处理</th><th style="width:170px">前一个有效桶</th>
             <th style="width:170px">后一个有效桶</th><th>原因</th></tr></thead>
           <tbody>
             {% for gap in run.gaps['items'] %}
@@ -196,7 +218,12 @@
               <td class="small muted nowrap">{{ gap.end_time }}</td>
               <td class="num">{{ gap.cells }}</td>
               <td>
+                {% if gap.attribution == 'line' %}<span class="tag err">全线断采</span>
+                {% else %}<span class="tag">单设备断采</span>{% endif %}
+              </td>
+              <td>
                 {% if gap.kind == 'interpolated' %}<span class="tag ok">线性插补</span>
+                {% elif gap.kind == 'line_outage' %}<span class="tag err">留空·不可用</span>
                 {% else %}<span class="tag err">未修复 unrepaired</span>{% endif %}
               </td>
               <td class="small muted nowrap">{{ gap.prev_time or '—' }}</td>
@@ -209,8 +236,10 @@
       </div>
       <div class="panel-body tight">
         <p class="small muted" style="margin:0">
-          汇总：插补 {{ run.gaps.interpolated_cells }} 格，未修复 {{ run.gaps.unrepaired_cells }} 格
-          （其中首尾边界 {{ run.gaps.boundary_cells }} 格，按「首尾不外推」不填值）。
+          汇总：插补 {{ run.gaps.interpolated_cells }} 格（仅单设备短缺口），未修复 {{ run.gaps.unrepaired_cells }} 格
+          （其中首尾边界 {{ run.gaps.boundary_cells }} 格，按「首尾不外推」不填值），
+          全线断采 {{ run.gaps.line_outage_cells }} 格留空并列为不可用（共 {{ run.gaps.line_outage_gaps }} 段）。
+          原始缺口记录 {{ run.gaps.records | length }} 条永久保留（含起止桶、格数与归因），修补不会删除或改写记录。
         </p>
       </div>
       {% else %}
@@ -220,13 +249,14 @@
 
     <div id="tab-hour" class="tab-panel" hidden>
       <div class="panel-head" style="border-top:0">
-        <h3>四、小时摘要（min / max / mean / p95 + 缺口 + carried）</h3>
+        <h3>四、小时摘要（min / max / mean / p95 + 缺口 + carried + 全线断采）</h3>
         <div class="panel-actions"><span class="tag">{{ run.hourly | length }} 个小时桶</span></div>
       </div>
       <div class="table-wrap auto">
         <table class="dense">
           <thead><tr><th style="width:180px">小时起点</th><th style="width:64px">格数</th><th>min</th><th>max</th>
-            <th>mean</th><th>p95</th><th style="width:74px">缺口格</th><th style="width:74px">carried</th></tr></thead>
+            <th>mean</th><th>p95</th><th style="width:74px">缺口格</th><th style="width:84px">不可用格</th>
+            <th style="width:74px">carried</th><th style="width:80px">可用率</th><th style="width:76px">状态</th></tr></thead>
           <tbody>
             {% for hour in run.hourly %}
             <tr>
@@ -236,12 +266,26 @@
               <td class="num">{{ hour.max | fmt(3) }}</td>
               <td class="num">{{ hour.mean | fmt(3) }}</td>
               <td class="num">{{ hour.p95 | fmt(3) }}</td>
-              <td>{% if hour.gap_cells %}<span class="tag err">{{ hour.gap_cells }}</span>{% else %}0{% endif %}</td>
+              <td>{% if hour.gap_cells %}<span class="tag warn">{{ hour.gap_cells }}</span>{% else %}0{% endif %}</td>
+              <td>{% if hour.unavailable_cells %}<span class="tag err">{{ hour.unavailable_cells }}</span>{% else %}0{% endif %}</td>
               <td>{% if hour.carried_cells %}<span class="tag warn">{{ hour.carried_cells }}</span>{% else %}0{% endif %}</td>
+              <td class="num">{{ hour.availability | pct(1) }}</td>
+              <td>
+                {% if hour.status == 'unavailable' %}<span class="tag err">不可用</span>
+                {% elif hour.status == 'partial' %}<span class="tag err">部分不可用</span>
+                {% elif hour.status == 'gaps' %}<span class="tag warn">有缺口</span>
+                {% else %}<span class="tag ok">正常</span>{% endif %}
+              </td>
             </tr>
             {% endfor %}
           </tbody>
         </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">
+          分钟统计只用有效格（原始 / 沿用 / 单设备短缺口插补）；全线断采格留空、列为不可用，不参与 min/max/mean/p95。
+          可用率 = 可用格 / 该小时格数，可用格 = 原始 + 沿用（不含插补），与质量报告同一口径。
+        </p>
       </div>
     </div>
 
@@ -262,9 +306,11 @@
                 <tr><th>有效格（原始+沿用+插补）</th><td>{{ run.coverage.valid_cells }}</td></tr>
                 <tr><th>原始格（聚合+采样）</th><td>{{ run.coverage.raw_cells }}（raw 覆盖率 {{ run.coverage.raw_coverage | pct(2) }}）</td></tr>
                 <tr><th>沿用 carried</th><td>{{ run.coverage.carried_cells }}</td></tr>
-                <tr><th>插补</th><td>{{ run.coverage.interpolated_cells }}</td></tr>
+                <tr><th>插补（仅单设备短缺口）</th><td>{{ run.coverage.interpolated_cells }}</td></tr>
                 <tr><th>缺失（未修复）</th><td>{{ run.coverage.missing_cells }}</td></tr>
+                <tr><th>全线断采（留空不可用）</th><td>{{ run.coverage.line_outage_cells }} 格 · {{ run.coverage.line_outage_gap_count }} 段（{{ run.coverage.line_outage_labels or '无' }}）</td></tr>
                 <tr><th>coverage = 有效/应到</th><td><strong>{{ run.coverage.coverage | pct(2) }}</strong></td></tr>
+                <tr><th>可用率 availability = 可用/应到</th><td>{{ run.coverage.availability | pct(2) }}（可用 {{ run.coverage.available_cells }} 格 = 原始 + 沿用，不含插补）</td></tr>
                 <tr><th>分级（≥98% A / ≥95% B / else C）</th>
                   <td><span class="tag {% if run.coverage.grade == 'A' %}ok{% elif run.coverage.grade == 'B' %}warn{% else %}err{% endif %}">{{ run.coverage.grade }}</span></td></tr>
               </tbody>

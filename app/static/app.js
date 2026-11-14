@@ -189,8 +189,10 @@
       summaryBox.innerHTML =
         '<h3>对齐结论</h3>' +
         '<p class="small">' + driftText + '</p>' +
-        '<p class="small">缺口 <strong>' + data.gaps.count + '</strong> 处（插补 ' + data.gaps.interpolated_cells +
-          ' 格 / 未修复 ' + data.gaps.unrepaired_cells + ' 格），carried ' + data.grid.held_cells + ' 格，' +
+        '<p class="small">缺口 <strong>' + data.gaps.count + '</strong> 处（单设备 ' + data.gaps.device_gap_count +
+          ' 处 · 全线断采 ' + data.gaps.line_outage_gaps + ' 处），插补 ' + data.gaps.interpolated_cells +
+          ' 格 / 未修复 ' + data.gaps.unrepaired_cells + ' 格 / 不可用 ' + data.gaps.line_outage_cells + ' 格，' +
+          'carried ' + data.grid.held_cells + ' 格，' +
           '覆盖率 <strong>' + (cov.coverage * 100).toFixed(2) + '%</strong> ' + tagForGrade(cov.grade) + '</p>' +
         '<p><a class="btn small" href="/result/' + data.run_id + '">查看完整结果与依据 →</a></p>';
     }

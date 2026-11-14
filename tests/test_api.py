@@ -47,11 +47,18 @@ def test_drifted_device_offset_is_about_37_seconds(client: TestClient):
     assert data["drift"]["drifted"] is True
     assert data["drift"]["rmse_s"] < 1.0
     assert data["reference"]["device_id"] == "LINE-A-01"
-    # 温度序列：3 格插补缺口 + 5 格未修复缺口 = 2 处
+    # 温度序列：两段全线断采（3 格 + 5 格）都归因 line、留空不可用，不再插补 3 格那段。
     assert data["gaps"]["count"] == 2
-    assert data["gaps"]["interpolated_cells"] == 3
-    assert data["gaps"]["unrepaired_cells"] == 5
-    assert data["coverage"]["grade"] == "A"
+    assert data["gaps"]["line_outage_gaps"] == 2
+    assert data["gaps"]["device_gap_count"] == 0
+    assert data["gaps"]["interpolated_cells"] == 0
+    # 全线断采不计入「未修复设备缺口」，单独列为不可用格。
+    assert data["gaps"]["unrepaired_cells"] == 0
+    assert data["gaps"]["line_outage_cells"] == 8
+    assert data["coverage"]["grade"] == "B"
+    assert data["coverage"]["unavailable_cells"] == 8
+    assert data["line_outage"]["count"] == 2
+    assert data["line_outage"]["affected_devices"] == ["LINE-A-01", "LINE-A-02", "LINE-A-03"]
     assert data["coverage"]["expected_cells"] == 360
     assert data["interval_s"] == 60
     assert data["run_id"].startswith("run-")
@@ -60,14 +67,28 @@ def test_drifted_device_offset_is_about_37_seconds(client: TestClient):
 def test_low_rate_grades_and_carried_counts(client: TestClient):
     temperature = align(client, device_id="LINE-A-02", metric="temperature").json()
     assert temperature["drift"]["drifted"] is False          # 5s 设备时钟正常
-    assert temperature["coverage"]["grade"] == "B"
+    assert temperature["coverage"]["grade"] == "C"           # 全线断采 8 格 + 单设备断采 12 格
     assert temperature["coverage"]["carried_cells"] == 30    # 3 分钟降级段被 hold
     assert temperature["gaps"]["count"] == 3
+    assert temperature["gaps"]["line_outage_gaps"] == 2
+    assert temperature["gaps"]["device_gap_count"] == 1
 
     pressure = align(client, device_id="LINE-A-03", metric="pressure").json()
     assert pressure["coverage"]["grade"] == "C"
     assert abs(pressure["drift"]["offset_s"] - 37.0) < 1.0
-    assert pressure["gaps"]["unrepaired_cells"] == 30
+    assert pressure["gaps"]["unrepaired_cells"] == 25
+    assert pressure["gaps"]["line_outage_cells"] == 8
+
+
+def test_hourly_summary_shows_line_outage(client: TestClient):
+    data = align(client, device_id="LINE-A-03", metric="temperature").json()
+    hours = {h["hour_start"][11:13]: h for h in data["hourly"]}
+    assert hours["03"]["unavailable_cells"] == 3
+    assert hours["03"]["line_outage_cells"] == 3
+    assert hours["04"]["unavailable_cells"] == 5
+    assert hours["03"]["status"] == "partial"
+    # 摘要口径与质量报告一致：可用率 = 有效格 / 该小时格数。
+    assert hours["03"]["availability"] == (60 - 3) / 60
 
 
 def test_reference_device_reports_no_self_comparison(client: TestClient):
@@ -135,16 +156,58 @@ def test_report_and_csv_export(client: TestClient):
     report = client.get("/api/report").json()
     assert len(report["rows"]) == 5
     grades = {row["coverage"]["grade"] for row in report["rows"]}
-    assert grades == {"A", "B", "C"}
+    assert grades == {"B", "C"}  # 全线断采压低所有序列覆盖率
     assert len(report["devices"]) == 3
-    assert report["summary"]["total_gaps"] >= 5
+    # gap_count 只数单设备缺口；全线断采单独汇总。
+    assert report["summary"]["total_gaps"] == 2
+    assert report["summary"]["total_device_gaps"] == 2
+    assert report["line_outage"]["count"] == 2
+    assert report["line_outage"]["cells"] == 8
+    assert report["line_outage"]["affected_devices"] == ["LINE-A-01", "LINE-A-02", "LINE-A-03"]
+    for window in report["line_outage"]["windows"]:
+        assert {d["device_id"] for d in window["devices"]} == {"LINE-A-01", "LINE-A-02", "LINE-A-03"}
+        assert all(d["availability"] == 0.0 for d in window["devices"])
+    assert report["summary"]["total_unavailable"] > 0
 
     csv_resp = client.get("/api/report.csv")
     assert csv_resp.status_code == 200
     assert csv_resp.headers["content-type"].startswith("text/csv")
     lines = [line for line in csv_resp.text.strip().splitlines() if line]
     assert lines[0].startswith("device_id,metric,interval_s")
-    assert len(lines) == 6  # 表头 + 5 条序列
+    assert len(lines) == 1 + 5 + 1 + 1 + 6  # 表头 + 5 序列 + 段标记 + 段表头 + 2 段 × 3 设备
+    assert "line_outage_windows" in lines[0]
+    assert "# line_outages" in lines[6]
+    assert csv_resp.headers["X-Report-Id"] == report["report_id"]
+
+
+def test_rerun_same_batch_does_not_add_reports_or_change_conclusion(client: TestClient):
+    first = align(client, device_id="LINE-A-03", metric="temperature").json()
+    second = align(client, device_id="LINE-A-03", metric="temperature").json()
+    # 重跑同一批：run_id 相同（不新增运行记录），结论完全一致。
+    assert first["run_id"] == second["run_id"]
+    assert first["coverage"] == second["coverage"]
+    assert first["gaps"] == second["gaps"]
+
+    report_a = client.get("/api/report").json()
+    report_b = client.get("/api/report").json()
+    assert report_a["report_id"] == report_b["report_id"]
+    assert report_a["reports_stored"] == report_b["reports_stored"]
+    assert report_a["summary"] == report_b["summary"]
+
+
+def test_repair_keeps_original_gap_record(client: TestClient):
+    # LINE-A-02 温度 05:10–05:21 是单设备长缺口（12 格）：不插补，但原始记录必须保留。
+    data = align(client, device_id="LINE-A-02", metric="temperature").json()
+    device_gaps = [g for g in data["gaps"]["items"] if g["attribution"] == "device"]
+    assert len(device_gaps) == 1
+    gap = device_gaps[0]
+    assert gap["cells"] == 12
+    assert gap["kind"] == "unrepaired"
+    assert gap["filled_values"] == []
+    assert gap["original"]["cells"] == 12
+    records = [r for r in data["gaps"]["records"] if r["attribution"] == "device"]
+    assert len(records) == 1
+    assert records[0]["start_time"].endswith("05:10:00+08:00")
 
 
 def test_alignment_pipeline_stages_recorded(client: TestClient):

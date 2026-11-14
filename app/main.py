@@ -195,6 +195,8 @@ def _report(dataset, threshold: float) -> dict:
     cached = STATE["report_cache"].get(key)
     if cached is None:
         cached = pipeline.build_report(dataset, threshold)
+        # 报告按内容指纹落库：同一结论重跑只更新同一条，不新增报告。
+        store.save_report(cached)
         STATE["report_cache"][key] = cached
     return cached
 
@@ -264,7 +266,9 @@ async def api_align(request: Request):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f"对齐失败：{exc}") from exc
 
-    run_id = store.save_run(dataset.dataset_id, payload)
+    # 同一数据集 + 设备 + 指标 + 阈值 → 同一 run_id：重跑同一批不新增运行记录，结论也不变。
+    run_id = store.deterministic_run_id(dataset.dataset_id, device_id, metric, threshold)
+    store.save_run(dataset.dataset_id, payload, run_id=run_id)
     payload_out = dict(payload)
     payload_out["run_id"] = run_id
     return payload_out
@@ -283,9 +287,11 @@ def api_report(threshold: float | None = None):
     dataset = get_dataset()
     report = _report(dataset, _parse_threshold(threshold))
     return {
+        "report_id": report["report_id"],
         "dataset_id": report["dataset_id"],
         "threshold_s": report["threshold_s"],
         "summary": report["summary"],
+        "line_outage": report["line_outage"],
         "devices": report["devices"],
         "rows": [
             {
@@ -300,10 +306,13 @@ def api_report(threshold: float | None = None):
                     "rmse_s": row["drift"].get("rmse_s"),
                     "drifted": row["drift"].get("drifted"),
                 },
-                "gap_count": row["gaps"]["count"],
+                "gap_count": row["gaps"]["device_gap_count"],
+                "line_outage_gap_count": row["gaps"]["line_outage_gaps"],
+                "line_outage_labels": row["coverage"]["line_outage_labels"],
             }
             for row in report["rows"]
         ],
+        "reports_stored": store.count_reports(),
     }
 
 
@@ -314,7 +323,10 @@ def api_report_csv(threshold: float | None = None):
     return PlainTextResponse(
         report["csv"],
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="tsgrid-quality-{dataset.dataset_id}.csv"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="tsgrid-quality-{dataset.dataset_id}.csv"',
+            "X-Report-Id": report["report_id"],
+        },
     )
 
 

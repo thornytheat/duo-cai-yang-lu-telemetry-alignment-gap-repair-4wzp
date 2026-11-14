@@ -6,21 +6,68 @@
 <a class="btn secondary small" href="/api/report">JSON</a>
 <a class="btn small" href="/api/report.csv">导出 CSV</a>
 {% endblock %}
-{% block status_left %}全部 {{ report.summary.pairs }} 个「设备 × 指标」逐条走完对齐流水线后汇总 · 同一数据集按阈值缓存重算{% endblock %}
-{% block status_right %}平均覆盖率 {{ report.summary.avg_coverage | pct(2) }} · 缺口 {{ report.summary.total_gaps }} 处 · 漂移 {{ report.summary.drifted_pairs }} 个序列{% endblock %}
+{% block status_left %}全部 {{ report.summary.pairs }} 个「设备 × 指标」逐条走完对齐流水线后汇总 · 同一数据集按阈值缓存重算 · 报告 {{ report.report_id }}{% endblock %}
+{% block status_right %}平均覆盖率 {{ report.summary.avg_coverage | pct(2) }} · 单设备缺口 {{ report.summary.total_device_gaps }} 处 · 全线断采 {{ report.summary.line_outage_cells }} 格 · 漂移 {{ report.summary.drifted_pairs }} 个序列{% endblock %}
 
 {% block content %}
 <div class="page-head">
   <div>
     <h1 class="page-title">质量报告与跨设备对比</h1>
     <p class="page-sub">数据集 {{ dataset.dataset_id }} · 漂移阈值 {{ report.threshold_s | fmt(1) }}s ·
-      共 {{ report.summary.pairs }} 个「设备 × 指标」序列，逐条走完对齐流水线后汇总；筛选与搜索即时生效（纯前端，不新增接口）。</p>
+      共 {{ report.summary.pairs }} 个「设备 × 指标」序列，逐条走完对齐流水线后汇总；筛选与搜索即时生效（纯前端，不新增接口）。
+      报告 ID <code class="mono">{{ report.report_id }}</code>（同一数据集 + 阈值 + 结论重跑不新增报告）。</p>
   </div>
   <div class="page-head-actions">
     <a class="btn small" href="/api/report.csv">导出 CSV</a>
     <a class="btn secondary small" href="/workbench">执行新对齐</a>
   </div>
 </div>
+
+{% if report.line_outage and report.line_outage.count %}
+<section class="panel" id="line-outage">
+  <div class="panel-head">
+    <h2>全线断采（采集链路中断）</h2>
+    <div class="panel-actions">
+      <span class="tag err">{{ report.line_outage.count }} 段 · {{ report.line_outage.cells }} 格</span>
+      <span class="tag">受影响设备 {{ report.line_outage.affected_devices | join('、') }}</span>
+      <span class="tag">该时段可用率 {{ report.line_outage.availability | pct(1) }}</span>
+    </div>
+  </div>
+  <div class="table-wrap auto">
+    <table class="dense">
+      <thead>
+        <tr><th style="width:180px">时段起点</th><th style="width:180px">时段终点</th><th style="width:64px">格数</th>
+          <th style="width:120px">受影响设备</th><th>各设备该时段可用率</th><th style="width:96px">处理</th></tr>
+      </thead>
+      <tbody>
+        {% for w in report.line_outage.windows %}
+        <tr>
+          <td class="small muted nowrap">{{ w.start_time }}</td>
+          <td class="small muted nowrap">{{ w.end_time }}</td>
+          <td class="num">{{ w.cells }}</td>
+          <td class="small">{{ w.affected_devices | join('、') }}</td>
+          <td class="small">
+            {% for d in w.devices %}
+            <span class="tag {% if d.availability == 0 %}err{% elif d.availability < 1 %}warn{% else %}ok{% endif %}">
+              {{ d.device_id }} {{ d.availability | pct(1) }}
+            </span>
+            {% endfor %}
+          </td>
+          <td><span class="tag err">留空·不可用</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="panel-body tight">
+    <p class="small muted" style="margin:0">
+      归因口径：同一分钟所有设备、所有指标都没有原始采样点 → 全线断采（采集链路停过），
+      网格留空、列为不可用、不做插补；只有单设备短缺口（≤3 格）才会被线性插补。
+      该时段与逐序列表、CSV 导出使用同一份判断。
+    </p>
+  </div>
+</section>
+{% endif %}
 
 <div class="toolbar" style="border:1px solid var(--line);border-radius:10px;background:#fff;margin-bottom:12px">
   <select id="review-device" aria-label="按设备筛选">
@@ -57,8 +104,8 @@
           <thead>
             <tr><th style="width:104px">设备</th><th style="width:54px">采样率</th><th style="width:92px">指标</th>
               <th style="width:70px">最差指标</th><th style="width:76px">覆盖率</th><th style="width:48px">分级</th>
-              <th style="width:46px">缺口</th><th style="width:62px">carried</th>
-              <th style="width:60px">未修复</th><th style="width:118px">时钟偏移</th></tr>
+              <th style="width:64px">单设备缺口</th><th style="width:62px">carried</th>
+              <th style="width:60px">未修复</th><th style="width:70px">不可用格</th><th style="width:118px">时钟偏移</th></tr>
           </thead>
           <tbody>
             {% for dev in report.devices %}
@@ -72,6 +119,7 @@
               <td class="num">{{ dev.gap_count }}</td>
               <td class="num">{{ dev.carried_cells }}</td>
               <td class="num">{{ dev.unrepaired_cells }}</td>
+              <td class="num">{% if dev.unavailable_cells %}<span class="tag err">{{ dev.unavailable_cells }}</span>{% else %}0{% endif %}</td>
               <td class="nowrap">
                 {% if dev.offset_s is not none %}
                   <span class="num">{{ dev.offset_s | fmt(2) }} s</span>
@@ -103,13 +151,14 @@
           <thead>
             <tr><th style="width:100px">设备</th><th style="width:56px">指标</th><th style="width:52px">采样率</th>
               <th style="width:54px">应到格</th><th style="width:54px">原始格</th><th style="width:54px">沿用</th>
-              <th style="width:50px">插补</th><th style="width:58px">未修复</th><th style="width:72px">coverage</th>
-              <th style="width:46px">分级</th><th style="width:46px">缺口</th><th style="width:150px">漂移 offset / ppm / 残差</th></tr>
+              <th style="width:50px">插补</th><th style="width:58px">未修复</th><th style="width:64px">不可用格</th>
+              <th style="width:72px">coverage</th><th style="width:72px">可用率</th>
+              <th style="width:46px">分级</th><th style="width:64px">单设备缺口</th><th style="width:110px">全线断采时段</th><th style="width:150px">漂移 offset / ppm / 残差</th></tr>
           </thead>
           <tbody>
             {% for row in report.rows %}
             <tr data-device="{{ row.device_id }}" data-metric="{{ row.metric }}"
-                data-search="{{ row.device_id }} {{ row.metric }} {{ row.metric_label }} {{ row.coverage.grade }}">
+                data-search="{{ row.device_id }} {{ row.metric }} {{ row.metric_label }} {{ row.coverage.grade }} {{ row.coverage.line_outage_labels }}">
               <td class="nowrap">{{ row.device_id }}</td>
               <td class="small nowrap">{{ row.metric_label }}</td>
               <td class="num">{{ row.interval_s }}s</td>
@@ -118,9 +167,12 @@
               <td class="num">{% if row.coverage.carried_cells %}<span class="tag warn">{{ row.coverage.carried_cells }}</span>{% else %}0{% endif %}</td>
               <td class="num">{{ row.coverage.interpolated_cells }}</td>
               <td class="num">{% if row.coverage.unrepaired_cells %}<span class="tag err">{{ row.coverage.unrepaired_cells }}</span>{% else %}0{% endif %}</td>
+              <td class="num">{% if row.coverage.unavailable_cells %}<span class="tag err">{{ row.coverage.unavailable_cells }}</span>{% else %}0{% endif %}</td>
               <td class="num">{{ row.coverage.coverage | pct(2) }}</td>
+              <td class="num">{{ row.coverage.availability | pct(2) }}</td>
               <td><span class="tag {% if row.coverage.grade == 'A' %}ok{% elif row.coverage.grade == 'B' %}warn{% else %}err{% endif %}">{{ row.coverage.grade }}</span></td>
-              <td class="num">{{ row.gaps.count }}</td>
+              <td class="num">{{ row.coverage.device_gap_count }}</td>
+              <td class="small nowrap">{% if row.coverage.line_outage_labels %}<span class="tag err">{{ row.coverage.line_outage_labels }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
               <td class="small nowrap">
                 {% if row.drift.offset_s is not none %}
                   <span class="num">{{ row.drift.offset_s | fmt(2) }} s</span> ·
@@ -135,7 +187,8 @@
       </div>
       <div class="panel-body tight">
         <p class="small muted" style="margin:0">
-          coverage =（聚合 + 原始采样 + 沿用 + 插补）/ 应到格；未修复格不计入有效格。分级：≥98% A / ≥95% B / else C。
+          coverage =（聚合 + 原始采样 + 沿用 + 单设备短缺口插补）/ 应到格；未修复格与全线断采不可用格不计入有效格。
+          分级：≥98% A / ≥95% B / else C。
           基准设备（该指标最高频序列）不与自己比对，偏移、走时与残差记为 —。
         </p>
       </div>
@@ -161,15 +214,20 @@
             <div class="k-value">{{ report.summary.avg_coverage | pct(2) }}</div>
             <div class="k-note">A {{ report.summary.grade_counts.get('A', 0) }} / B {{ report.summary.grade_counts.get('B', 0) }} / C {{ report.summary.grade_counts.get('C', 0) }}</div>
           </div>
-          <div class="kpi {% if report.summary.total_gaps %}warn{% else %}ok{% endif %}">
-            <div class="k-label">缺口总数</div>
-            <div class="k-value">{{ report.summary.total_gaps }}</div>
+          <div class="kpi {% if report.summary.total_device_gaps %}warn{% else %}ok{% endif %}">
+            <div class="k-label">单设备缺口</div>
+            <div class="k-value">{{ report.summary.total_device_gaps }}</div>
             <div class="k-note">未修复格 {{ report.summary.total_unrepaired }}</div>
           </div>
           <div class="kpi {% if report.summary.drifted_pairs %}warn{% endif %}">
             <div class="k-label">判定漂移</div>
             <div class="k-value">{{ report.summary.drifted_pairs }}</div>
             <div class="k-note">序列级 · 阈值 {{ report.threshold_s | fmt(1) }}s</div>
+          </div>
+          <div class="kpi {% if report.summary.total_unavailable %}err{% else %}ok{% endif %}">
+            <div class="k-label">全线断采</div>
+            <div class="k-value">{{ report.summary.line_outage_cells }}</div>
+            <div class="k-note">{{ report.summary.line_outage_windows | length }} 段 · 不可用格合计 {{ report.summary.total_unavailable }}</div>
           </div>
           <div class="kpi">
             <div class="k-label">carried 格</div>
@@ -181,10 +239,14 @@
         <h3 style="margin:2px 0 4px">三、跨设备对比要点</h3>
         <ul class="list small" style="margin:0">
           <li><strong>采样率差异：</strong>1s 设备每格聚合 60 个原始点，5s 设备 12 个，60s 设备 1 个（直接沿用原值）。</li>
-          <li><strong>缺采段对齐：</strong>全线缺采的 03:00–03:02 与 04:10–04:14 在三台设备上同时出现，缺口判定一致；
-            各设备自身的断采（如 LINE-A-03 压力 01:40–02:05）只影响本设备覆盖率。</li>
+          <li><strong>缺采段归因：</strong>全线断采的 {{ report.summary.line_outage_labels or '（无）' }} 在
+            {{ report.summary.affected_devices | join('、') }} 上同时出现——同一分钟所有设备、所有指标都没有原始点，
+            说明采集链路整体停过；这些格留空并列为不可用（{{ report.summary.line_outage_cells }} 格），不做插补。
+            各设备自身的断采（如 LINE-A-03 压力 01:40–02:05、LINE-A-02 温度 05:10–05:21）只影响本设备覆盖率。</li>
           <li><strong>降级段：</strong>LINE-A-02 温度 02:10–02:55 以 180s 上报、LINE-A-03 05:00–05:50 以 120s 上报，
             1 分钟网格以 hold 沿用并计入 carried，不误判为缺口。</li>
+          <li><strong>修补边界：</strong>只有单设备短缺口（≤3 格）做线性插补；单设备长缺口与全线断采都不填值。
+            修补不会删除原始缺口记录（结果页缺口明细保留 original 快照）。</li>
           <li><strong>时钟：</strong>共 {{ report.summary.drifted_pairs }} 个序列判定为时钟漂移；
             LINE-A-03 的偏移量与「现场 +37 秒」的结论一致，其余设备偏移在阈值之内。</li>
         </ul>
@@ -193,8 +255,12 @@
           <summary>CSV 列与导出说明</summary>
           <div class="small" style="margin-top:6px">
             CSV 列：device_id, metric, interval_s, expected_cells, raw_cells, carried_cells, interpolated_cells,
-            unrepaired_cells, valid_cells, coverage, grade, gap_count, offset_s, rate_ppm, rmse_s, drifted。
-            <div style="margin-top:6px">导出的是当前数据集 + 当前阈值的全量结果；按阈值重新计算会得到不同的分级。</div>
+            unrepaired_cells, line_outage_cells, unavailable_cells, valid_cells, coverage, availability, grade,
+            gap_count, line_outage_windows, offset_s, rate_ppm, rmse_s, drifted。
+            <div style="margin-top:6px">
+              表尾另附「全线断采时段 × 受影响设备 × 该时段可用率」段（<code>window_start,window_end,cells,device_id,availability</code>）；
+              报告 id <code class="mono">{{ report.report_id }}</code>，同一数据集 + 阈值 + 结论重跑不新增报告、不改变结论。
+            </div>
           </div>
         </details>
       </div>

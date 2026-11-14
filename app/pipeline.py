@@ -1,13 +1,16 @@
 """编排：一条 (设备, 指标) 的对齐流水线。
 
-1 数据导入（序列与基准选择）→ 2 漂移估计 → 3 网格重采样 → 4 缺口判定
+1 数据导入（序列与基准选择）→ 2 漂移估计 → 3 网格重采样 → 4 缺口归因
 → 5 小时摘要 → 6 质量评分。路由只调用本模块，不写业务规则。
+
+全线断采（incidents）在流水线开头计算一次，之后网格、缺口、摘要、覆盖率
+全部引用同一份桶集合，保证「是不是全线断采」只有一个判断。
 """
 from __future__ import annotations
 
 import time
 
-from . import drift, gaps, grid, quality, settings, summary
+from . import drift, gaps, grid, incidents, quality, settings, summary
 from .telemetry import Dataset, Series
 
 
@@ -71,19 +74,27 @@ def run_alignment(
         drift_result["reference_interval_s"] = ref_series.interval_s
         stage("漂移估计", f"锚点 {drift_result['anchors']} 个，offset {drift_result['offset_s']:+.1f}s", t0)
 
-    # 3) 网格重采样
+    # 3) 网格重采样（遇到全线断采桶一律留空，不 hold / 不插补）
     t0 = time.perf_counter()
     start_bucket = int(dataset.window_start // settings.BUCKET_SECONDS)
     end_bucket = int(dataset.window_end // settings.BUCKET_SECONDS)
-    cells = grid.resample(series.points, series.interval_s, start_bucket, end_bucket)
+    outage = incidents.describe(dataset, start_bucket=start_bucket, end_bucket=end_bucket)
+    outage_buckets = outage["buckets"]
+    cells = grid.resample(
+        series.points,
+        series.interval_s,
+        start_bucket,
+        end_bucket,
+        line_outage_buckets=outage_buckets,
+    )
     grid_stats = grid.stats(cells)
-    stage("网格重采样", f"{grid_stats['cells']} 格（聚合 {grid_stats['agg_cells']} / 采样 {grid_stats['sample_cells']} / 沿用 {grid_stats['held_cells']}）", t0)
+    stage("网格重采样", f"{grid_stats['cells']} 格（聚合 {grid_stats['agg_cells']} / 采样 {grid_stats['sample_cells']} / 沿用 {grid_stats['held_cells']} / 全线断采 {grid_stats['line_outage_cells']}）", t0)
 
-    # 4) 缺口判定与修复
+    # 4) 缺口判定与修复（与网格共用同一份全线断采桶）
     t0 = time.perf_counter()
-    gap_result = gaps.find_gaps(cells)
+    gap_result = gaps.find_gaps(cells, line_outage_buckets=outage_buckets)
     gaps.apply_repair(cells)
-    stage("缺口判定", f"缺口 {gap_result['count']} 处，插补 {gap_result['interpolated_cells']} 格，未修复 {gap_result['unrepaired_cells']} 格", t0)
+    stage("缺口判定", f"缺口 {gap_result['count']} 处（单设备 {gap_result['device_gap_count']} / 全线断采 {gap_result['line_outage_gaps']}），插补 {gap_result['interpolated_cells']} 格，未修复 {gap_result['unrepaired_cells']} 格", t0)
 
     # 5) 小时摘要
     t0 = time.perf_counter()
@@ -93,7 +104,7 @@ def run_alignment(
     # 6) 质量评分
     t0 = time.perf_counter()
     expected = dataset.bucket_count()
-    coverage = quality.coverage_report(cells, expected, gap_result)
+    coverage = quality.coverage_report(cells, expected, gap_result, line_outage=outage)
     stage("质量评分", f"覆盖率 {coverage['coverage']:.4f} → {coverage['grade']} 级", t0)
 
     payload = {
@@ -114,6 +125,13 @@ def run_alignment(
         "grid": grid_stats,
         "gaps": gap_result,
         "coverage": coverage,
+        "line_outage": {
+            "count": outage["count"],
+            "cells": outage["cells"],
+            "affected_devices": outage["affected_devices"],
+            "availability": outage["availability"],
+            "windows": outage["windows"],
+        },
         "hourly": hourly,
         "preview": cells[:60],
         "reference": {
@@ -142,11 +160,38 @@ def build_report(dataset: Dataset, threshold_s: float = settings.DEFAULT_OFFSET_
                 "gaps": payload["gaps"],
             }
         )
-    return {
+    outage = incidents.describe(dataset)
+    out = {
         "dataset_id": dataset.dataset_id,
         "threshold_s": threshold_s,
         "rows": rows,
-        "summary": quality.report_summary(rows),
-        "devices": quality.device_rollup(rows),
-        "csv": quality.report_csv(rows),
+        "summary": quality.report_summary(rows, line_outage=outage),
+        "devices": quality.device_rollup(rows, line_outage=outage),
+        "line_outage": {
+            "count": outage["count"],
+            "cells": outage["cells"],
+            "affected_devices": outage["affected_devices"],
+            "availability": outage["availability"],
+            "windows": outage["windows"],
+        },
+        "csv": quality.report_csv(rows, line_outage=outage),
     }
+    # 同一数据集 + 同一阈值 + 同一结论 → 同一 report_id；重跑不新增报告，结论也不会变。
+    out["report_id"] = quality.report_id(
+        dataset.dataset_id,
+        threshold_s,
+        {
+            "rows": [
+                {
+                    "device_id": row["device_id"],
+                    "metric": row["metric"],
+                    "coverage": row["coverage"]["coverage"],
+                    "grade": row["coverage"]["grade"],
+                    "gaps": row["gaps"]["records"],
+                }
+                for row in out["rows"]
+            ],
+            "line_outage": out["line_outage"]["windows"],
+        },
+    )
+    return out

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,13 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
+);
+CREATE TABLE IF NOT EXISTS reports (
+    report_id   TEXT PRIMARY KEY,
+    dataset_id  TEXT,
+    threshold_s REAL,
+    created_at  TEXT,
+    payload_json TEXT
 );
 """
 
@@ -89,13 +97,21 @@ def list_datasets() -> list[dict]:
     return out
 
 
-def save_run(dataset_id: str, payload: dict) -> str:
+def deterministic_run_id(dataset_id: str, device_id: str, metric: str, threshold_s: float) -> str:
+    """同一数据集 + 设备 + 指标 + 阈值 → 同一 run_id：重跑同一批不会新增运行记录。"""
+    key = "|".join([dataset_id, device_id, metric, f"{float(threshold_s):.6f}"])
+    return "run-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+
+
+def save_run(dataset_id: str, payload: dict, run_id: str | None = None) -> str:
+    """保存一次对齐运行；传入 run_id 时按主键更新（内容相同的重跑沿用同一 run_id，不新增记录）。"""
     init_db()
-    run_id = "run-" + uuid.uuid4().hex[:10]
+    run_id = run_id or "run-" + uuid.uuid4().hex[:10]
     with _connect() as conn:
         conn.execute(
             "INSERT INTO runs (run_id, dataset_id, device_id, metric, threshold_s, created_at, payload_json)"
-            " VALUES (?,?,?,?,?,?,?)",
+            " VALUES (?,?,?,?,?,?,?)"
+            " ON CONFLICT(run_id) DO UPDATE SET payload_json = excluded.payload_json",
             (
                 run_id,
                 dataset_id,
@@ -143,3 +159,30 @@ def set_meta(key: str, value: str) -> None:
     init_db()
     with _connect() as conn:
         conn.execute("INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+
+
+def save_report(report: dict) -> str:
+    """按内容指纹幂等保存质量报告：同一结论重跑只更新同一条，不新增报告。"""
+    init_db()
+    report_id = report["report_id"]
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO reports (report_id, dataset_id, threshold_s, created_at, payload_json)"
+            " VALUES (?,?,?,?,?)"
+            " ON CONFLICT(report_id) DO UPDATE SET payload_json = excluded.payload_json",
+            (
+                report_id,
+                report["dataset_id"],
+                report["threshold_s"],
+                _now(),
+                json.dumps({k: v for k, v in report.items() if k != "csv"}, ensure_ascii=False),
+            ),
+        )
+    return report_id
+
+
+def count_reports() -> int:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM reports").fetchone()
+    return int(row["n"])
